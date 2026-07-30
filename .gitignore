@@ -9,3 +9,10 @@ htmlcov/
 build/
 dist/
 geckodriver.log
+.env
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.html.gz
+browser-profile/
