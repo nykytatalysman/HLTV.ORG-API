@@ -4,6 +4,11 @@ HLTV may return a Cloudflare challenge instead of the requested page. This is
 not a parser failure: the browser must first receive permission to reach the
 page.
 
+For `hltv_service.worker`, a recognized challenge is persisted as blocked raw
+evidence, the ingestion run is marked `blocked`, no immediate retry is made,
+and existing normalized cache records are retained. The FastAPI process
+continues serving that cache with stale-age metadata.
+
 Cloudflare documents that successfully completing a challenge creates a
 `cf_clearance` cookie. That clearance is tied to the visitor and device and can
 be re-evaluated as browsing behavior changes:
@@ -11,7 +16,7 @@ be re-evaluated as browsing behavior changes:
 - [Challenge Passage](https://developers.cloudflare.com/cloudflare-challenges/challenge-types/challenge-pages/challenge-passage/)
 - [Clearance cookies](https://developers.cloudflare.com/cloudflare-challenges/concepts/clearance/)
 
-## Recommended configuration
+## Optional manual library configuration
 
 Use visible browser mode and a dedicated persistent profile:
 
@@ -32,8 +37,9 @@ If a challenge appears, complete it yourself in the browser window. Later runs
 using the same profile can reuse valid browser state.
 
 The package deliberately does not solve CAPTCHAs, copy clearance cookies
-between machines, rotate proxies or identities, or repeatedly retry blocked
-requests.
+between machines, rotate proxies, identities or browser fingerprints, or
+repeatedly retry blocked requests. Do not point the service at a personal
+browser profile.
 
 ## Troubleshooting
 

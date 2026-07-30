@@ -1,0 +1,52 @@
+openapi: 3.1.0
+info:
+  title: HLTV Data Service
+  version: 1.0.0
+paths:
+  /v1/matches:
+    get:
+      summary: Read the latest cached normalized matches
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [live, upcoming, finished, postponed, cancelled]
+        - in: query
+          name: team_id
+          schema: {type: integer, minimum: 1}
+      responses:
+        "200":
+          description: A cached response, including stale data
+          content:
+            application/json:
+              example:
+                schema_version: "1.0"
+                data:
+                  - provider: hltv
+                    provider_match_id: 2400001
+                    status: upcoming
+                    scheduled_at_utc: "2026-08-01T12:00:00Z"
+                    team_one:
+                      provider: hltv
+                      provider_team_id: 1001
+                      name: Alpha
+                    team_two:
+                      provider: hltv
+                      provider_team_id: 1002
+                      name: Beta
+                    best_of: 3
+                    stars: 2
+                    match_url: https://www.hltv.org/matches/2400001/alpha-vs-beta
+                    observed_at: "2026-07-30T12:00:00Z"
+                    source_updated_at: null
+                    effective_at: "2026-08-01T12:00:00Z"
+                    data_completeness: {match_identity: true}
+                    source_snapshot_id: snapshot_example
+                meta:
+                  data_age_seconds: 42
+                  is_stale: false
+                  source_snapshot_id: snapshot_example
+                  pagination: {limit: 50, offset: 0, next_offset: null}
+        "503":
+          description: No usable cached match observations exist

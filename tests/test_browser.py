@@ -1,6 +1,11 @@
 import pytest
 
-from HLTV.browser import Page, is_cloudflare_challenge, validate_navigation
+from HLTV.browser import (
+    Page,
+    SeleniumFetcher,
+    is_cloudflare_challenge,
+    validate_navigation,
+)
 from HLTV.exceptions import HLTVNavigationError
 
 
@@ -53,3 +58,18 @@ def test_navigation_validation_requires_intended_hltv_page():
             "https://www.hltv.org/matches",
             "https://example.com/matches",
         )
+
+
+def test_chromium_configuration_does_not_conceal_automation():
+    class Options:
+        def __init__(self):
+            self.arguments = []
+            self.page_load_strategy = None
+
+        def add_argument(self, value):
+            self.arguments.append(value)
+
+    options = Options()
+    SeleniumFetcher._configure_chromium(options)
+    assert all("AutomationControlled" not in value for value in options.arguments)
+    assert options.page_load_strategy == "eager"

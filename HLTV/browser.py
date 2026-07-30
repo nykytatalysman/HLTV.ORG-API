@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import suppress
 from dataclasses import dataclass
+from os import getenv
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Any
@@ -117,6 +118,8 @@ class SeleniumFetcher:
             try:
                 if choice == "chrome":
                     options = webdriver.ChromeOptions()
+                    if binary := getenv("CHROME_BINARY"):
+                        options.binary_location = binary
                     if self.headless:
                         options.add_argument("--headless=new")
                     self._configure_chromium(options)
@@ -159,8 +162,6 @@ class SeleniumFetcher:
         options.add_argument("--disable-gpu")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--no-sandbox")
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.page_load_strategy = "eager"
 
     def _follow_existing_link(self, driver: Any, url: str) -> bool:
@@ -228,7 +229,6 @@ class SeleniumFetcher:
                 html=driver.page_source,
                 title=driver.title or "",
             )
-            validate_navigation(url, page.url)
         except HLTVNavigationError:
             raise
         except Exception as exc:
@@ -241,6 +241,7 @@ class SeleniumFetcher:
                 "then retry.",
                 page=page,
             )
+        validate_navigation(url, page.url)
         return page
 
     def close(self) -> None:
