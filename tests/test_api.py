@@ -5,7 +5,7 @@ import pytest
 from HLTV import HLTVClient, Matches, News, Teams
 from HLTV.api import _archive_date, _ranking_date
 from HLTV.browser import Page
-from HLTV.exceptions import HLTVNotFoundError, HLTVValidationError
+from HLTV.exceptions import HLTVNotFoundError, HLTVParseError, HLTVValidationError
 
 RANKING = """
 <div class="ranked-team">
@@ -107,6 +107,17 @@ def test_legacy_team_content_uses_search_result():
     assert profile.current_rank == "15"
     assert fetcher.urls[1].endswith("/team/6665/astralis")
     assert fetcher.closed
+
+
+def test_team_content_only_translates_explicit_no_result_state():
+    with pytest.raises(HLTVNotFoundError):
+        Teams(fetcher=FakeFetcher(['<div class="search">No results</div>'])).TeamContent(
+            "Missing"
+        )
+    with pytest.raises(HLTVParseError):
+        Teams(fetcher=FakeFetcher(["<main>broken selector</main>"])).TeamContent(
+            "Broken"
+        )
 
 
 def test_ranking_rejects_unsafe_custom_url():

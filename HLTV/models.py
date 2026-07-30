@@ -12,6 +12,7 @@ class Player:
     country: str = ""
     image_url: str = ""
     status: str = ""
+    provider_id: int | None = None
 
 
 @dataclass(slots=True)
@@ -23,6 +24,8 @@ class RankedTeam:
     change: str = ""
     team_url: str = ""
     logo_url: str = ""
+    provider_id: int | None = None
+    previous_position: int | None = None
 
 
 @dataclass(slots=True)
@@ -56,6 +59,8 @@ class TeamProfile:
     current_form: list[int] = field(default_factory=lambda: [0, 0])
     team_logo: str = ""
     url: str = ""
+    provider_id: int | None = None
+    roster: list[Player] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -69,6 +74,12 @@ class Match:
     time: str = ""
     stars: int = 0
     maps: list[str] = field(default_factory=list)
+    provider_id: int | None = None
+    team_ids: tuple[int | None, int | None] = (None, None)
+    team_urls: tuple[str, str] = ("", "")
+    event_id: int | None = None
+    event_url: str = ""
+    scheduled_at_utc: str | None = None
 
 
 @dataclass(slots=True)

@@ -1,4 +1,7 @@
-from HLTV.browser import Page, is_cloudflare_challenge
+import pytest
+
+from HLTV.browser import Page, is_cloudflare_challenge, validate_navigation
+from HLTV.exceptions import HLTVNavigationError
 
 
 def test_detects_cloudflare_titles_case_insensitively():
@@ -33,3 +36,20 @@ def test_does_not_flag_normal_hltv_pages():
             title="Counter-Strike Matches & livescore | HLTV.org",
         )
     )
+
+
+def test_navigation_validation_requires_intended_hltv_page():
+    validate_navigation(
+        "https://www.hltv.org/team/6665/astralis",
+        "https://www.hltv.org/team/6665/astralis",
+    )
+    with pytest.raises(HLTVNavigationError):
+        validate_navigation(
+            "https://www.hltv.org/team/6665/astralis",
+            "https://www.hltv.org/",
+        )
+    with pytest.raises(HLTVNavigationError):
+        validate_navigation(
+            "https://www.hltv.org/matches",
+            "https://example.com/matches",
+        )

@@ -1,4 +1,15 @@
+import pytest
+
+from HLTV.exceptions import HLTVBlockedError, HLTVParseError
+from HLTV.ids import (
+    extract_event_id,
+    extract_match_id,
+    extract_news_id,
+    extract_player_id,
+    extract_team_id,
+)
 from HLTV.parsers import (
+    _absolute,
     parse_matches,
     parse_news_article,
     parse_news_list,
@@ -118,3 +129,56 @@ def test_news_list_and_article():
     assert article.author == "Author"
     assert article.content == "First paragraph."
     assert article.images == ["https://cdn/photo.jpg"]
+
+
+def test_missing_urls_stay_missing_instead_of_becoming_the_homepage():
+    assert _absolute(None) == ""
+    assert _absolute("") == ""
+    assert _absolute("/team/1/example") == "https://www.hltv.org/team/1/example"
+    ranking = parse_rankings(RANKING_HTML.replace('<img src="https://cdn/team.png">', ""))
+    assert ranking.rankings[0].logo_url == ""
+    profile = parse_team_profile(TEAM_HTML.replace('<img class="teamlogo" src="https://cdn/astralis.svg">', ""))
+    assert profile.team_logo == ""
+    matches = parse_matches(MATCHES_HTML.replace('href="/matches/2/c-vs-d"', ""))
+    assert matches.matches[1].url == ""
+    article = parse_news_article(ARTICLE_HTML.replace('<img class="image" src="https://cdn/photo.jpg">', ""))
+    assert article.images == []
+
+
+@pytest.mark.parametrize(
+    ("extractor", "url", "expected"),
+    [
+        (extract_team_id, "/team/6665/astralis", 6665),
+        (extract_player_id, "https://www.hltv.org/player/7592/device", 7592),
+        (extract_match_id, "/matches/2379999/a-vs-b", 2379999),
+        (extract_event_id, "/events/7557/major", 7557),
+        (extract_news_id, "/news/40123/story", 40123),
+        (extract_team_id, "/team/not-a-number/name", None),
+        (extract_match_id, None, None),
+        (extract_event_id, "https://example.com/events/7/name", None),
+    ],
+)
+def test_provider_id_extraction(extractor, url, expected):
+    assert extractor(url) == expected
+
+
+def test_match_parser_deduplicates_by_numeric_match_id_not_team_names():
+    duplicate = MATCHES_HTML + MATCHES_HTML.replace(
+        "/matches/2/c-vs-d", "/matches/3/c-vs-d-rematch"
+    )
+    result = parse_matches(duplicate)
+    assert [match.provider_id for match in result.matches] == [1, 2, 3]
+
+
+def test_match_parser_distinguishes_empty_blocked_and_broken_pages():
+    assert parse_matches(
+        '<main class="matches-page"><div class="no-matches">No upcoming matches</div></main>'
+    ).matches == []
+    with pytest.raises(HLTVBlockedError):
+        parse_matches('<script src="/cdn-cgi/challenge-platform/x"></script>')
+    with pytest.raises(HLTVParseError, match="containers") as layout:
+        parse_matches("<main>unrelated page</main>")
+    assert layout.value.parse_state == "unexpected_layout"
+    with pytest.raises(HLTVParseError) as regression:
+        parse_matches('<main class="matches-page"><div class="match-wrapper"></div></main>')
+    assert regression.value.parse_state == "parser_regression"

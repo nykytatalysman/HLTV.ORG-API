@@ -135,10 +135,7 @@ class Teams(_BaseClient):
         if not team:
             raise HLTVValidationError("team cannot be empty")
         search = self._fetch(f"{BASE_URL}/search?query={quote_plus(team)}")
-        try:
-            url = parse_team_search(search.html, team)
-        except Exception as exc:
-            raise HLTVNotFoundError(f"No HLTV team found for {team!r}") from exc
+        url = parse_team_search(search.html, team)
         page = self._fetch(url)
         return parse_team_profile(page.html, url=page.url)
 

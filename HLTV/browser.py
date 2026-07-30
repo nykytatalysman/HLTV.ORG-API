@@ -37,6 +37,36 @@ def is_cloudflare_challenge(page: Page) -> bool:
     )
 
 
+def validate_navigation(requested_url: str, final_url: str) -> None:
+    """Require a final HLTV URL that still represents the requested page."""
+    requested = urlsplit(requested_url)
+    final = urlsplit(final_url)
+    allowed = {"hltv.org", "www.hltv.org"}
+    if (
+        requested.scheme != "https"
+        or requested.hostname not in allowed
+        or final.scheme != "https"
+        or final.hostname not in allowed
+    ):
+        raise HLTVNavigationError("Browser navigation left the allowed HLTV origin.")
+
+    requested_parts = [part for part in requested.path.split("/") if part]
+    final_parts = [part for part in final.path.split("/") if part]
+    if not requested_parts:
+        valid = not final_parts
+    elif requested_parts[0] in {"team", "player", "matches", "events", "news"}:
+        expected = requested_parts[:2]
+        valid = final_parts[: len(expected)] == expected
+    elif requested_parts[:2] == ["ranking", "teams"]:
+        valid = final_parts[:2] == ["ranking", "teams"]
+    else:
+        valid = final_parts[:1] == requested_parts[:1]
+    if not valid:
+        raise HLTVNavigationError(
+            f"HLTV navigation ended on an unexpected page: {final.path or '/'}"
+        )
+
+
 class SeleniumFetcher:
     """Load HLTV pages through a real browser.
 
@@ -160,13 +190,12 @@ class SeleniumFetcher:
             )
             if link is None:
                 return False
-            previous = driver.current_url
             driver.execute_script("arguments[0].click()", link)
             WebDriverWait(driver, self.timeout).until(
                 lambda item: urldefrag(item.current_url)[0].rstrip("/") == wanted
-                or item.current_url != previous
             )
-            return True
+            validate_navigation(url, driver.current_url)
+            return urldefrag(driver.current_url)[0].rstrip("/") == wanted
         except Exception:
             return False
 
@@ -199,6 +228,7 @@ class SeleniumFetcher:
                 html=driver.page_source,
                 title=driver.title or "",
             )
+            validate_navigation(url, page.url)
         except HLTVNavigationError:
             raise
         except Exception as exc:
@@ -208,7 +238,8 @@ class SeleniumFetcher:
             raise HLTVBlockedError(
                 "HLTV blocked this browser session. Use visible mode and a dedicated "
                 "`profile_dir`, complete any challenge in the browser window, "
-                "then retry."
+                "then retry.",
+                page=page,
             )
         return page
 
