@@ -12,7 +12,12 @@ class ServiceModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     @field_validator(
-        "observed_at", "source_updated_at", "effective_at", check_fields=False
+        "observed_at",
+        "source_updated_at",
+        "effective_at",
+        "scheduled_at_utc",
+        "ranking_date",
+        check_fields=False,
     )
     @classmethod
     def timezone_aware(cls, value: datetime | None) -> datetime | None:
