@@ -1,0 +1,32 @@
+name: manual-live-smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  one-paced-navigation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e .
+      - name: Run one responsible live navigation
+        env:
+          HLTV_HEADLESS: "true"
+        shell: bash
+        run: |
+          set +e
+          python scripts/smoke_test.py
+          result=$?
+          set -e
+          if [ "$result" -eq 2 ]; then
+            echo "Blocked by upstream protection; no retry or evasion attempted."
+            exit 0
+          fi
+          exit "$result"
