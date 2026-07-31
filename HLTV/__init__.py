@@ -3,10 +3,12 @@
 from .api import HLTVClient, Matches, News, Teams
 from .exceptions import (
     HLTVBlockedError,
+    HLTVDeletedError,
     HLTVError,
     HLTVNavigationError,
     HLTVNotFoundError,
     HLTVParseError,
+    HLTVUnavailableError,
     HLTVValidationError,
 )
 from .models import (
@@ -25,9 +27,11 @@ __all__ = [
     "HLTVClient",
     "HLTVError",
     "HLTVBlockedError",
+    "HLTVDeletedError",
     "HLTVNavigationError",
     "HLTVNotFoundError",
     "HLTVParseError",
+    "HLTVUnavailableError",
     "HLTVValidationError",
     "Match",
     "Matches",

@@ -25,6 +25,14 @@ class HLTVNotFoundError(HLTVError, LookupError):
     """Raised when a requested team or article cannot be found."""
 
 
+class HLTVDeletedError(HLTVNotFoundError):
+    """Raised when HLTV identifies a requested match as deleted."""
+
+
+class HLTVUnavailableError(HLTVNotFoundError):
+    """Raised when a requested HLTV page is explicitly unavailable."""
+
+
 class HLTVParseError(HLTVError):
     """Raised when a loaded HLTV page no longer matches known structures."""
 
