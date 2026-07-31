@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hmac
+import sqlite3
+from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal
 
@@ -143,18 +145,45 @@ def create_app(
     config: ServiceConfig | None = None, storage: Storage | None = None
 ) -> FastAPI:
     settings = config or ServiceConfig.from_env()
-    cache = storage or Storage(settings.database_path)
+    owns_storage = storage is None
+    cache = storage or Storage(
+        settings.database_path,
+        busy_timeout_ms=settings.sqlite_busy_timeout_ms,
+    )
+
+    @asynccontextmanager
+    async def lifespan(_application: FastAPI):
+        yield
+        if owns_storage:
+            cache.close()
+
     application = FastAPI(
         title="HLTV Data Service",
         version=SERVICE_VERSION,
         description="Read-only normalized HLTV cache. Browser work is worker-only.",
+        lifespan=lifespan,
     )
     application.state.storage = cache
     application.state.config = settings
+    application.state.runtime_status = {
+        "scheduler_running": False,
+        "next_scheduled_run": None,
+        "browser_process_status": "not_started",
+    }
 
     @application.middleware("http")
     async def correlation_id(request: Request, call_next: Any) -> Any:
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).casefold():
+                raise
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "detail": "Cache is temporarily busy; retry shortly"
+                },
+            )
         request_id = request.headers.get("x-request-id", "")
         if request_id and len(request_id) <= 128:
             response.headers["x-request-id"] = request_id
@@ -205,15 +234,70 @@ def create_app(
                 "database_available": current["database_available"],
                 "most_recent_successful_ingestion": current["most_recent_success"],
                 "most_recent_attempted_ingestion": current["most_recent_attempt"],
+                "most_recent_blocked_ingestion": current["most_recent_blocked"],
                 "blocked": current["blocked"],
                 "cache_age_seconds": cache_age,
                 "parser_version": PARSER_VERSION,
                 "data_counts": current["data_counts"],
+                "current_lock_owner": (
+                    current["current_lock"]["owner_id"]
+                    if current["current_lock"]
+                    else None
+                ),
+                "lock_expiry": (
+                    current["current_lock"]["expires_at"]
+                    if current["current_lock"]
+                    else None
+                ),
+                "scheduler_running": application.state.runtime_status[
+                    "scheduler_running"
+                ],
+                "next_scheduled_run": application.state.runtime_status[
+                    "next_scheduled_run"
+                ],
+                "run_duration_seconds": current[
+                    "last_run_duration_seconds"
+                ],
+                "records_fetched": current["records_fetched"],
+                "records_inserted": current["records_inserted"],
+                "records_unchanged": current["records_unchanged"],
+                "records_rejected": current["records_rejected"],
+                "parser_failures_by_page_type": current[
+                    "parser_failures_by_page_type"
+                ],
+                "section_parser_error_counts": current[
+                    "section_parser_errors"
+                ],
+                "cache_freshness_by_data_type": current["cache_freshness"],
+                "queue_depth_by_priority": current[
+                    "queue_depth_by_priority"
+                ],
+                "database_file_size": current["database_file_size"],
+                "raw_evidence_size": current["raw_evidence_size"],
+                "browser_process_status": application.state.runtime_status[
+                    "browser_process_status"
+                ],
             },
             {
                 "data_age_seconds": cache_age,
                 "is_stale": cache_age is None
                 or cache_age > settings.max_stale_seconds,
+                "source_snapshot_id": None,
+                "pagination": None,
+            },
+        )
+
+    @application.get("/v1/operations", dependencies=secured)
+    def operations() -> dict[str, Any]:
+        current = cache.status()
+        return _envelope(
+            {
+                **current,
+                **application.state.runtime_status,
+            },
+            {
+                "data_age_seconds": None,
+                "is_stale": False,
                 "source_snapshot_id": None,
                 "pagination": None,
             },

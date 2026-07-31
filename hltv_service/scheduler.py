@@ -42,7 +42,10 @@ def _parser() -> argparse.ArgumentParser:
 def _production_cycle(config: ServiceConfig) -> dict[str, Any]:
     from HLTV.browser import SeleniumFetcher
 
-    storage = Storage(config.database_path)
+    storage = Storage(
+        config.database_path,
+        busy_timeout_ms=config.sqlite_busy_timeout_ms,
+    )
     fetcher = SeleniumFetcher(
         browser=config.browser,
         headless=config.headless,

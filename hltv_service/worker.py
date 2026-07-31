@@ -20,6 +20,7 @@ from HLTV.browser import Page
 from HLTV.exceptions import HLTVBlockedError, HLTVNavigationError
 from HLTV.parsers import BASE_URL, parse_matches, parse_rankings, parse_team_profile
 
+from . import PARSER_VERSION
 from .config import ServiceConfig
 from .normalize import normalize_match, normalize_ranking, normalize_team
 from .parsers_v2 import (
@@ -27,7 +28,7 @@ from .parsers_v2 import (
     parse_match_intelligence,
     parse_team_map_stats,
 )
-from .storage import Storage, stable_id, utc_now
+from .storage import Storage, canonical_json, stable_id, utc_now
 
 LOGGER = logging.getLogger("hltv_service.worker")
 
@@ -100,6 +101,23 @@ class IngestionWorker:
                     html=page.html,
                 )
                 self.summary["snapshots"] += 1
+                LOGGER.info(
+                    canonical_json(
+                        {
+                            "event": "fetch_observation",
+                            "ingestion_run_id": self.run_id,
+                            "fetch_observation_id": snapshot_id,
+                            "page_type": page_type,
+                            "parser_version": PARSER_VERSION,
+                            "result": "success",
+                            "blocked": False,
+                            "duration_seconds": max(
+                                0.0,
+                                (self.now() - captured_at).total_seconds(),
+                            ),
+                        }
+                    )
+                )
                 return page, snapshot_id, captured_at
             except HLTVBlockedError as exc:
                 page = (
@@ -120,6 +138,23 @@ class IngestionWorker:
                     parse_error=str(exc),
                 )
                 self.storage.save_parse_result(snapshot_id, "blocked", str(exc))
+                LOGGER.warning(
+                    canonical_json(
+                        {
+                            "event": "fetch_observation",
+                            "ingestion_run_id": self.run_id,
+                            "fetch_observation_id": snapshot_id,
+                            "page_type": page_type,
+                            "parser_version": PARSER_VERSION,
+                            "result": "blocked",
+                            "blocked": True,
+                            "duration_seconds": max(
+                                0.0,
+                                (self.now() - captured_at).total_seconds(),
+                            ),
+                        }
+                    )
+                )
                 raise IngestionBlocked(str(exc), snapshot_id) from exc
             except HLTVNavigationError:
                 if attempt >= self.config.retry_attempts:
@@ -239,6 +274,23 @@ class IngestionWorker:
             status=status,
             source_snapshot_id=snapshot_id,
             error=error,
+        )
+        LOGGER.info(
+            canonical_json(
+                {
+                    "event": "ingestion_item",
+                    "ingestion_run_id": self.run_id,
+                    "fetch_observation_id": snapshot_id,
+                    "provider_entity_id": provider_id,
+                    "page_type": item_type,
+                    "parser_version": PARSER_VERSION,
+                    "result": status,
+                    "duration_seconds": max(
+                        0.0, (self.now() - attempted_at).total_seconds()
+                    ),
+                    "blocked": status == "blocked",
+                }
+            )
         )
 
     def _match_priority(self, match: dict[str, Any]) -> tuple[int, str, int]:
@@ -618,7 +670,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     from HLTV.browser import SeleniumFetcher
 
-    storage = Storage(config.database_path)
+    storage = Storage(
+        config.database_path,
+        busy_timeout_ms=config.sqlite_busy_timeout_ms,
+    )
     fetcher = SeleniumFetcher(
         browser=config.browser,
         headless=config.headless,

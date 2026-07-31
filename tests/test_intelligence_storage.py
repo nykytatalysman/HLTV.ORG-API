@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from hltv_service.parsers_v2 import parse_match_intelligence
-from hltv_service.storage import Storage
+from hltv_service.storage import SCHEMA_VERSION, Storage
 
 FIXTURES = Path(__file__).parent / "fixtures"
 URL = "https://www.hltv.org/matches/2400001/alpha-vs-beta"
@@ -51,7 +51,10 @@ def test_v1_database_migrates_to_append_only_intelligence_schema(tmp_path) -> No
         )
     }
 
-    assert store.connection.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert (
+        store.connection.execute("PRAGMA user_version").fetchone()[0]
+        == SCHEMA_VERSION
+    )
     assert {
         "match_detail_observations",
         "match_lineup_observations",

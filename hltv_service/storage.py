@@ -5,16 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 import zlib
 from collections.abc import Iterator
-from contextlib import contextmanager
-from datetime import UTC, datetime
+from contextlib import contextmanager, suppress
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from . import PARSER_VERSION
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 ENTITY_TABLES = {
     "ranking": "ranking_observations",
     "team": "team_observations",
@@ -54,17 +55,52 @@ def stable_id(prefix: str, *parts: object) -> str:
 
 
 class Storage:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self, path: str | Path, *, busy_timeout_ms: int = 5_000
+    ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(self.path, check_same_thread=False)
-        self.connection.row_factory = sqlite3.Row
-        self.connection.execute("PRAGMA foreign_keys = ON")
-        self.connection.execute("PRAGMA journal_mode = WAL")
+        self.busy_timeout_ms = busy_timeout_ms
+        self._local = threading.local()
+        self._connections: list[sqlite3.Connection] = []
+        self._connections_lock = threading.Lock()
+        self._closed = False
+        self._local.connection = self._open_connection()
         self.migrate()
 
+    def _open_connection(self) -> sqlite3.Connection:
+        if self._closed:
+            raise RuntimeError("Storage is closed")
+        connection = sqlite3.connect(
+            self.path,
+            timeout=self.busy_timeout_ms / 1_000,
+            check_same_thread=False,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA synchronous = NORMAL")
+        with self._connections_lock:
+            self._connections.append(connection)
+        return connection
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        connection = getattr(self._local, "connection", None)
+        if connection is None:
+            connection = self._open_connection()
+            self._local.connection = connection
+        return connection
+
     def close(self) -> None:
-        self.connection.close()
+        self._closed = True
+        with self._connections_lock:
+            connections = list(self._connections)
+            self._connections.clear()
+        for connection in connections:
+            with suppress(sqlite3.Error):
+                connection.close()
 
     def migrate(self) -> None:
         self.connection.executescript(
@@ -377,9 +413,6 @@ class Storage:
             """
         )
         append_only_tables = (
-            "raw_snapshots",
-            "raw_parse_attempts",
-            "snapshot_verifications",
             "normalized_verifications",
             "ingestion_item_results",
             "match_lineup_players",
@@ -395,6 +428,22 @@ class Storage:
                 END;
                 CREATE TRIGGER IF NOT EXISTS {table}_no_delete
                 BEFORE DELETE ON {table} BEGIN
+                    SELECT RAISE(ABORT, 'append-only table');
+                END;
+                """
+            )
+        for table in (
+            "raw_snapshots",
+            "raw_parse_attempts",
+            "snapshot_verifications",
+        ):
+            self.connection.execute(
+                f"DROP TRIGGER IF EXISTS {table}_no_delete"
+            )
+            self.connection.executescript(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS {table}_no_update
+                BEFORE UPDATE ON {table} BEGIN
                     SELECT RAISE(ABORT, 'append-only table');
                 END;
                 """
@@ -1044,6 +1093,12 @@ class Storage:
             ORDER BY completed_at DESC, rowid DESC LIMIT 1
             """
         ).fetchone()
+        blocked = self.connection.execute(
+            """
+            SELECT * FROM ingestion_runs WHERE blocked = 1
+            ORDER BY attempted_at DESC, rowid DESC LIMIT 1
+            """
+        ).fetchone()
         counts = {
             name: self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             for name, table in {
@@ -1063,14 +1118,216 @@ class Storage:
             )
             """
         ).fetchone()[0]
+        lock = self.connection.execute(
+            "SELECT * FROM worker_locks WHERE lock_name = 'ingestion'"
+        ).fetchone()
+        parser_failures = {
+            row["page_type"]: row["count"]
+            for row in self.connection.execute(
+                """
+                SELECT snapshot.page_type, COUNT(*) count
+                FROM raw_parse_attempts attempt
+                JOIN raw_snapshots snapshot
+                  ON snapshot.snapshot_id = attempt.snapshot_id
+                WHERE attempt.parse_status = 'failed'
+                GROUP BY snapshot.page_type
+                """
+            )
+        }
+        freshness: dict[str, str | None] = {}
+        for name, table in {**ENTITY_TABLES, **INTELLIGENCE_TABLES}.items():
+            freshness[name] = self.connection.execute(
+                f"SELECT MAX(observed_at) FROM {table}"
+            ).fetchone()[0]
+        section_errors: dict[str, int] = {}
+        for table in (
+            "match_detail_observations",
+            "event_detail_observations",
+        ):
+            for row in self.connection.execute(
+                f"""
+                SELECT data_json FROM {table}
+                ORDER BY observed_at DESC LIMIT 1000
+                """
+            ):
+                for section in json.loads(row[0]).get("section_errors", {}):
+                    section_errors[section] = section_errors.get(section, 0) + 1
+        summary = json.loads(attempted["summary_json"]) if attempted else {}
+        inserted_keys = (
+            "rankings",
+            "matches",
+            "teams",
+            "rosters",
+            "events",
+            "match_details",
+            "lineups",
+            "vetoes",
+            "map_results",
+            "team_map_stats",
+            "team_results",
+            "head_to_head",
+        )
+        run_duration = None
+        if attempted and attempted["completed_at"]:
+            run_duration = max(
+                0.0,
+                (
+                    datetime.fromisoformat(attempted["completed_at"])
+                    - datetime.fromisoformat(attempted["attempted_at"])
+                ).total_seconds(),
+            )
+        queue_depth = self.queue_depth()
         return {
             "database_available": True,
             "most_recent_attempt": dict(attempted) if attempted else None,
             "most_recent_success": dict(successful) if successful else None,
+            "most_recent_blocked": dict(blocked) if blocked else None,
             "blocked": bool(attempted["blocked"]) if attempted else False,
             "newest_observed_at": newest,
             "data_counts": counts,
+            "current_lock": dict(lock) if lock else None,
+            "last_run_duration_seconds": run_duration,
+            "records_fetched": int(summary.get("snapshots", 0)),
+            "records_inserted": sum(int(summary.get(key, 0)) for key in inserted_keys),
+            "records_unchanged": int(summary.get("duplicates", 0)),
+            "records_rejected": int(summary.get("item_failures", 0)),
+            "parser_failures_by_page_type": parser_failures,
+            "section_parser_errors": section_errors,
+            "cache_freshness": freshness,
+            "queue_depth_by_priority": queue_depth,
+            "database_file_size": self.path.stat().st_size
+            if self.path.exists()
+            else 0,
+            "raw_evidence_size": self.connection.execute(
+                "SELECT COALESCE(SUM(LENGTH(html_zlib)), 0) FROM raw_snapshots"
+            ).fetchone()[0],
         }
+
+    def queue_depth(self) -> dict[str, int]:
+        result = {
+            "live": 0,
+            "within_24_hours": 0,
+            "missing_detail": 0,
+            "finished_missing_result": 0,
+            "other": 0,
+        }
+        now = utc_now()
+        for match in self.matches(limit=10_000):
+            status = match.get("status")
+            scheduled = (
+                datetime.fromisoformat(match["scheduled_at_utc"])
+                if match.get("scheduled_at_utc")
+                else None
+            )
+            detail = self.match_detail(match["provider_match_id"])
+            if status == "live":
+                result["live"] += 1
+            elif (
+                status == "upcoming"
+                and scheduled
+                and scheduled <= now + timedelta(hours=24)
+            ):
+                result["within_24_hours"] += 1
+            elif not detail:
+                result["missing_detail"] += 1
+            elif status == "finished" and not detail[0].get("result"):
+                result["finished_missing_result"] += 1
+            else:
+                result["other"] += 1
+        return result
+
+    def integrity_check(self) -> str:
+        results = [
+            row[0]
+            for row in self.connection.execute("PRAGMA integrity_check")
+        ]
+        return "ok" if results == ["ok"] else "; ".join(results)
+
+    def backup(self, destination: str | Path) -> Path:
+        target = Path(destination)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        backup_connection = sqlite3.connect(target)
+        try:
+            self.connection.backup(backup_connection)
+        finally:
+            backup_connection.close()
+        return target
+
+    def retain_raw_evidence(
+        self,
+        *,
+        ordinary_days: int,
+        failed_days: int,
+        batch_size: int,
+        now: datetime | None = None,
+    ) -> dict[str, int]:
+        current = now or utc_now()
+        ordinary_cutoff = iso(current - timedelta(days=ordinary_days))
+        failed_cutoff = iso(current - timedelta(days=failed_days))
+        candidates = self.connection.execute(
+            """
+            SELECT snapshot.snapshot_id, snapshot.captured_at, snapshot.blocked,
+                (
+                    SELECT attempt.parse_status
+                    FROM raw_parse_attempts attempt
+                    WHERE attempt.snapshot_id = snapshot.snapshot_id
+                    ORDER BY attempt.parsed_at DESC LIMIT 1
+                ) latest_parse_status
+            FROM raw_snapshots snapshot
+            WHERE NOT EXISTS (
+                SELECT 1 FROM normalized_verifications item
+                WHERE item.source_snapshot_id = snapshot.snapshot_id
+            )
+              AND NOT EXISTS (
+                SELECT 1 FROM ranking_observations item
+                WHERE item.source_snapshot_id = snapshot.snapshot_id
+            )
+              AND NOT EXISTS (
+                SELECT 1 FROM team_observations item
+                WHERE item.source_snapshot_id = snapshot.snapshot_id
+            )
+              AND NOT EXISTS (
+                SELECT 1 FROM roster_observations item
+                WHERE item.source_snapshot_id = snapshot.snapshot_id
+            )
+              AND NOT EXISTS (
+                SELECT 1 FROM match_observations item
+                WHERE item.source_snapshot_id = snapshot.snapshot_id
+            )
+              AND NOT EXISTS (
+                SELECT 1 FROM event_observations item
+                WHERE item.source_snapshot_id = snapshot.snapshot_id
+            )
+            ORDER BY snapshot.captured_at, snapshot.snapshot_id
+            LIMIT ?
+            """,
+            (batch_size,),
+        ).fetchall()
+        removable = []
+        for row in candidates:
+            failed = bool(row["blocked"]) or row["latest_parse_status"] in {
+                "failed",
+                "blocked",
+            }
+            cutoff = failed_cutoff if failed else ordinary_cutoff
+            days = failed_days if failed else ordinary_days
+            if days and row["captured_at"] < cutoff:
+                removable.append(row["snapshot_id"])
+        with self.transaction():
+            for snapshot_id in removable:
+                self.connection.execute(
+                    "DELETE FROM raw_parse_attempts WHERE snapshot_id = ?",
+                    (snapshot_id,),
+                )
+                self.connection.execute(
+                    "DELETE FROM snapshot_verifications WHERE snapshot_id = ?",
+                    (snapshot_id,),
+                )
+                self.connection.execute(
+                    "DELETE FROM raw_snapshots WHERE snapshot_id = ?",
+                    (snapshot_id,),
+                )
+        return {"scanned": len(candidates), "deleted": len(removable)}
 
     def known_team_profiles(self) -> list[dict[str, Any]]:
         candidates: dict[int, dict[str, Any]] = {}
