@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: HLTV Data Service
-  version: 1.0.0
+  version: 2.0.0
 paths:
   /v1/matches:
     get:
@@ -50,3 +50,42 @@ paths:
                   pagination: {limit: 50, offset: 0, next_offset: null}
         "503":
           description: No usable cached match observations exist
+  /v2/matches/{provider_match_id}/veto:
+    get:
+      summary: Read the ordered veto state cached before an optional cutoff
+      parameters:
+        - in: path
+          name: provider_match_id
+          required: true
+          schema: {type: integer, minimum: 1}
+        - in: query
+          name: observed-before
+          schema: {type: string, format: date-time}
+      responses:
+        "200":
+          description: Cached ordered veto observations
+          content:
+            application/json:
+              example:
+                schema_version: "2.0"
+                data:
+                  - provider: hltv
+                    provider_match_id: 2400001
+                    sequence_number: 1
+                    provider_team_id: 1001
+                    team_name: Alpha
+                    action: pick
+                    canonical_map_id: de_nuke
+                    map_name: Nuke
+                    raw_text: Alpha picked Nuke
+                    observed_at: "2026-07-30T12:00:00Z"
+                    source_snapshot_id: snapshot_detail
+                meta:
+                  data_age_seconds: 42
+                  is_stale: false
+                  last_verified_at: "2026-07-30T12:00:00Z"
+                  source_snapshot_id: snapshot_detail
+                  evidence_references: [snapshot_detail]
+                  pagination: null
+        "503":
+          description: No usable cached veto observation exists

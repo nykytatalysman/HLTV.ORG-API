@@ -6,7 +6,9 @@
 A cache-backed ingestion and read service for public pages on
 [HLTV.org](https://www.hltv.org/), plus the backward-compatible Python client.
 It provides normalized rankings, team profiles, rosters, live/upcoming
-matches, evidence provenance, and stable HLTV numeric provider identities.
+matches, match-specific lineups, vetoes, maps, bounded team statistics,
+recent results, event context, evidence provenance, and stable HLTV numeric
+provider identities.
 
 > This project is not affiliated with or endorsed by HLTV.org. Page scraping
 > can break when upstream markup changes. Use a modest request rate and review
@@ -90,6 +92,10 @@ Run one ingestion scope:
 python -m hltv_service.worker rankings
 python -m hltv_service.worker matches
 python -m hltv_service.worker teams
+python -m hltv_service.worker details
+python -m hltv_service.worker stats
+python -m hltv_service.worker events
+python -m hltv_service.worker intelligence
 ```
 
 Run the bounded full refresh:
@@ -103,6 +109,19 @@ matches, discovered events, and a TTL-limited number of discovered team
 profiles. Navigation retries are bounded and apply only to transient browser
 errors. A Cloudflare block is saved once, marks the run `blocked`, preserves
 all cached rows, and exits with status `2`.
+
+For a dedicated worker process, the single-writer scheduler runs a bounded
+refresh every configured interval:
+
+```bash
+python -m hltv_service.scheduler
+python -m hltv_service.scheduler --once
+```
+
+Each cycle plans live matches first, then matches starting within 24 hours,
+missing details/results, other upcoming matches, bounded team map-stat
+refreshes, and referenced events. A SQLite lease prevents overlapping worker
+cycles.
 
 The live smoke test is manual-only and makes one modestly paced request:
 
@@ -153,6 +172,18 @@ Endpoints:
 | `GET /v1/teams/{provider_team_id}/history` | Versioned team history |
 | `GET /v1/teams/{provider_team_id}/roster` | Latest roster observation |
 | `GET /v1/evidence/{source_snapshot_id}` | Evidence metadata and SHA-256 hash |
+| `GET /v2/matches/{provider_match_id}` | Cached match detail and section completeness |
+| `GET /v2/matches/{provider_match_id}/lineups` | Match-specific player/coach identities |
+| `GET /v2/matches/{provider_match_id}/veto` | Ordered observed picks, bans and decider |
+| `GET /v2/matches/{provider_match_id}/maps` | Per-map score, halves and overtime state |
+| `GET /v2/teams/{provider_team_id}/map-stats` | Bounded dated map statistics |
+| `GET /v2/teams/{provider_team_id}/results` | Recent team results |
+| `GET /v2/head-to-head` | Explicit two-team limited H2H records |
+| `GET /v2/events/{provider_event_id}` | Event dates, prize, location and participants |
+
+V2 envelopes use `schema_version: "2.0"` and add
+`last_verified_at` plus `evidence_references`. Repeated unchanged captures
+advance verification freshness without duplicating normalized state.
 
 Evidence responses omit raw HTML by default. `HLTV_ALLOW_RAW_EVIDENCE=true`
 may enable it only in a controlled development environment.
@@ -173,6 +204,15 @@ it does not fabricate an empty successful ingestion.
 | `HLTV_PAGE_TIMEOUT` | `30` | Page timeout in seconds |
 | `HLTV_TEAM_PROFILE_TTL_SECONDS` | `21600` | Team refresh TTL |
 | `HLTV_MAXIMUM_TEAM_PROFILES_PER_RUN` | `20` | Bounded team work per run |
+| `HLTV_MAX_MATCH_DETAILS_PER_RUN` | `25` | Bounded detail work per run |
+| `HLTV_MAX_EVENT_DETAILS_PER_RUN` | `10` | Bounded event work per run |
+| `HLTV_MAX_TEAM_STATS_PER_RUN` | `20` | Bounded team-stat work per run |
+| `HLTV_MAP_STATS_LOOKBACK_DAYS` | `90` | Explicit team-stat date range |
+| `HLTV_MATCH_DETAIL_TTL_SECONDS` | `900` | Upcoming/live detail refresh TTL |
+| `HLTV_FINISHED_MATCH_REFRESH_TTL_SECONDS` | `86400` | Finished detail refresh TTL |
+| `HLTV_TEAM_STATS_TTL_SECONDS` | `21600` | Team map-stat refresh TTL |
+| `HLTV_INGESTION_LOCK_TTL_SECONDS` | `3600` | Stale worker-lease timeout |
+| `HLTV_SCHEDULER_INTERVAL_SECONDS` | `900` | Dedicated scheduler cadence |
 | `HLTV_ENABLED_REGIONS` | empty | Comma-separated regional ranking names |
 | `HLTV_RETRY_ATTEMPTS` | `3` | Transient navigation attempt limit |
 | `HLTV_LOG_LEVEL` | `INFO` | Worker log level |
@@ -210,6 +250,16 @@ Worker process (run on a controlled schedule, not per request):
 ```bash
 python -m hltv_service.worker refresh
 ```
+
+Long-running scheduled worker process:
+
+```bash
+python -m hltv_service.scheduler
+```
+
+Run only one scheduled worker replica against a volume. CounterSignal's
+validated file-backed SQLite/single-writer runtime remains a separate
+deployment and does not share this database file.
 
 Do not deploy the API without a persistent volume: ephemeral SQLite would
 discard the usable stale cache during a blocked ingestion period.

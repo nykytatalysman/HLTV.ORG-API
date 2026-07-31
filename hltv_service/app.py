@@ -6,10 +6,10 @@ import hmac
 from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse
 
-from . import PARSER_VERSION, SCHEMA_VERSION, SERVICE_VERSION
+from . import PARSER_VERSION, SCHEMA_VERSION, SERVICE_VERSION, V2_SCHEMA_VERSION
 from .config import ServiceConfig
 from .storage import Storage
 
@@ -69,6 +69,74 @@ def _envelope(
     data: object, meta: dict[str, Any]
 ) -> dict[str, Any]:
     return {"schema_version": SCHEMA_VERSION, "data": data, "meta": meta}
+
+
+def _v2_response(
+    records: list[dict[str, Any]],
+    config: ServiceConfig,
+    *,
+    singular: bool = False,
+    limit: int | None = None,
+    offset: int | None = None,
+) -> dict[str, Any]:
+    last_verified_values = [
+        datetime.fromisoformat(item["_last_verified_at"])
+        for item in records
+        if item.get("_last_verified_at")
+    ]
+    last_verified = max(last_verified_values) if last_verified_values else None
+    age = (
+        max(0, int((datetime.now(UTC) - last_verified).total_seconds()))
+        if last_verified
+        else None
+    )
+    evidence = sorted(
+        {
+            item["source_snapshot_id"]
+            for item in records
+            if item.get("source_snapshot_id")
+        }
+    )
+    cleaned = [
+        {
+            key: value
+            for key, value in item.items()
+            if not key.startswith("_")
+        }
+        for item in records
+    ]
+    return {
+        "schema_version": V2_SCHEMA_VERSION,
+        "data": (cleaned[0] if singular and cleaned else None)
+        if singular
+        else cleaned,
+        "meta": {
+            "data_age_seconds": age,
+            "is_stale": age is None or age > config.max_stale_seconds,
+            "last_verified_at": (
+                last_verified.astimezone(UTC).isoformat()
+                if last_verified
+                else None
+            ),
+            "source_snapshot_id": evidence[0] if len(evidence) == 1 else None,
+            "evidence_references": evidence,
+            "pagination": (
+                {
+                    "limit": limit,
+                    "offset": offset,
+                    "next_offset": (
+                        offset + limit
+                        if limit is not None
+                        and offset is not None
+                        and len(records) == limit
+                        else None
+                    ),
+                }
+                if limit is not None and offset is not None
+                else None
+            ),
+        },
+    }
 
 
 def create_app(
@@ -303,6 +371,169 @@ def create_app(
                 "pagination": None,
             },
         )
+
+    def v2_cutoff(value: datetime | None) -> str | None:
+        return _timestamp(value)
+
+    def require_v2(
+        records: list[dict[str, Any]], resource: str
+    ) -> list[dict[str, Any]]:
+        if not records:
+            raise HTTPException(
+                status_code=503,
+                detail=f"No usable cached {resource} is available",
+            )
+        return records
+
+    @application.get("/v2/matches/{provider_match_id}", dependencies=secured)
+    def match_detail(
+        provider_match_id: Annotated[int, Path(ge=1)],
+        observed_before: Annotated[
+            datetime | None, Query(alias="observed-before")
+        ] = None,
+    ) -> dict[str, Any]:
+        records = require_v2(
+            cache.match_detail(
+                provider_match_id, v2_cutoff(observed_before)
+            ),
+            "match detail",
+        )
+        return _v2_response(records, settings, singular=True)
+
+    @application.get(
+        "/v2/matches/{provider_match_id}/lineups", dependencies=secured
+    )
+    def match_lineups(
+        provider_match_id: Annotated[int, Path(ge=1)],
+        observed_before: Annotated[
+            datetime | None, Query(alias="observed-before")
+        ] = None,
+    ) -> dict[str, Any]:
+        records = require_v2(
+            cache.match_lineups(
+                provider_match_id, v2_cutoff(observed_before)
+            ),
+            "match lineups",
+        )
+        return _v2_response(records, settings)
+
+    @application.get(
+        "/v2/matches/{provider_match_id}/veto", dependencies=secured
+    )
+    def match_veto(
+        provider_match_id: Annotated[int, Path(ge=1)],
+        observed_before: Annotated[
+            datetime | None, Query(alias="observed-before")
+        ] = None,
+    ) -> dict[str, Any]:
+        records = require_v2(
+            cache.match_vetoes(
+                provider_match_id, v2_cutoff(observed_before)
+            ),
+            "match veto",
+        )
+        return _v2_response(records, settings)
+
+    @application.get(
+        "/v2/matches/{provider_match_id}/maps", dependencies=secured
+    )
+    def match_maps(
+        provider_match_id: Annotated[int, Path(ge=1)],
+        observed_before: Annotated[
+            datetime | None, Query(alias="observed-before")
+        ] = None,
+    ) -> dict[str, Any]:
+        records = require_v2(
+            cache.match_maps(
+                provider_match_id, v2_cutoff(observed_before)
+            ),
+            "match maps",
+        )
+        return _v2_response(records, settings)
+
+    @application.get(
+        "/v2/teams/{provider_team_id}/map-stats", dependencies=secured
+    )
+    def team_map_stats(
+        provider_team_id: Annotated[int, Path(ge=1)],
+        observed_before: Annotated[
+            datetime | None, Query(alias="observed-before")
+        ] = None,
+    ) -> dict[str, Any]:
+        records = require_v2(
+            cache.team_map_stats(
+                provider_team_id, v2_cutoff(observed_before)
+            ),
+            "team map statistics",
+        )
+        return _v2_response(records, settings)
+
+    @application.get(
+        "/v2/teams/{provider_team_id}/results", dependencies=secured
+    )
+    def team_results(
+        provider_team_id: Annotated[int, Path(ge=1)],
+        observed_before: Annotated[
+            datetime | None, Query(alias="observed-before")
+        ] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> dict[str, Any]:
+        records = require_v2(
+            cache.team_results(
+                provider_team_id,
+                v2_cutoff(observed_before),
+                limit,
+                offset,
+            ),
+            "team results",
+        )
+        return _v2_response(
+            records, settings, limit=limit, offset=offset
+        )
+
+    @application.get("/v2/head-to-head", dependencies=secured)
+    def head_to_head(
+        team_one_id: Annotated[int, Query(alias="team-one-id", ge=1)],
+        team_two_id: Annotated[int, Query(alias="team-two-id", ge=1)],
+        observed_before: Annotated[
+            datetime | None, Query(alias="observed-before")
+        ] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> dict[str, Any]:
+        if team_one_id == team_two_id:
+            raise HTTPException(
+                status_code=422, detail="Two distinct team IDs are required"
+            )
+        records = require_v2(
+            cache.head_to_head(
+                team_one_id,
+                team_two_id,
+                v2_cutoff(observed_before),
+                limit,
+                offset,
+            ),
+            "head-to-head observations",
+        )
+        return _v2_response(
+            records, settings, limit=limit, offset=offset
+        )
+
+    @application.get("/v2/events/{provider_event_id}", dependencies=secured)
+    def event_detail(
+        provider_event_id: Annotated[int, Path(ge=1)],
+        observed_before: Annotated[
+            datetime | None, Query(alias="observed-before")
+        ] = None,
+    ) -> dict[str, Any]:
+        records = require_v2(
+            cache.event_detail(
+                provider_event_id, v2_cutoff(observed_before)
+            ),
+            "event detail",
+        )
+        return _v2_response(records, settings, singular=True)
 
     return application
 
