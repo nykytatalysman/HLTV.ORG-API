@@ -84,6 +84,19 @@ with `source_snapshot_id`.
 The legacy Python client remains available, but production consumers should
 use the service boundary so user-facing requests cannot create upstream load.
 
+For Railway production readiness, the image runs FastAPI and the bounded
+scheduler in one process supervisor:
+
+```bash
+python -m hltv_service.runtime
+```
+
+The runtime supports `combined` and API-only modes, enforces one Uvicorn worker
+for SQLite, handles termination signals, and leaves the API healthy when
+ingestion fails or is blocked. See
+[`docs/production-operations.md`](docs/production-operations.md) for the
+persistent-volume, backup, retention, recovery, and merge-order runbook.
+
 ## Worker usage
 
 Run one ingestion scope:
