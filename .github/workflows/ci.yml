@@ -60,7 +60,7 @@ jobs:
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
             -H "Authorization: Bearer $token" \
             http://127.0.0.1:18080/v2/matches/1)" != "401"
-          test "$(docker exec hltv-ci id -u)" != "0"
+          test "$(docker exec hltv-ci stat -c %u /proc/1)" != "0"
           docker exec hltv-ci test -f /data/hltv-service.sqlite
           docker stop --time 20 hltv-ci
           docker rm hltv-ci
@@ -81,4 +81,3 @@ jobs:
         run: |
           docker run --rm hltv-data-service:test python -c \
             "from selenium import webdriver; from selenium.webdriver.chrome.options import Options; o=Options(); o.binary_location='/usr/bin/chromium'; o.add_argument('--headless=new'); o.add_argument('--no-sandbox'); o.add_argument('--disable-dev-shm-usage'); d=webdriver.Chrome(options=o); d.get('about:blank'); assert d.current_url == 'about:blank'; d.quit()"
-
