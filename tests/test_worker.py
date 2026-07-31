@@ -37,6 +37,9 @@ def config(path, **changes):
     return ServiceConfig(
         database_path=path,
         maximum_team_profiles_per_run=2,
+        maximum_match_details_per_run=0,
+        maximum_event_details_per_run=0,
+        maximum_team_stats_per_run=0,
         retry_attempts=3,
         **changes,
     )
@@ -65,7 +68,10 @@ def test_refresh_ingests_rankings_matches_teams_and_evidence(tmp_path):
     assert summary["teams"] == 2
     assert summary["rosters"] == 2
     assert summary["events"] == 1
-    assert store.status()["data_counts"] == {
+    assert {
+        key: store.status()["data_counts"][key]
+        for key in ("ranking", "team", "roster", "match", "event")
+    } == {
         "ranking": 2,
         "team": 2,
         "roster": 2,

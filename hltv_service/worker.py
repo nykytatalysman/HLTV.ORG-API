@@ -22,6 +22,11 @@ from HLTV.parsers import BASE_URL, parse_matches, parse_rankings, parse_team_pro
 
 from .config import ServiceConfig
 from .normalize import normalize_match, normalize_ranking, normalize_team
+from .parsers_v2 import (
+    parse_event_detail,
+    parse_match_intelligence,
+    parse_team_map_stats,
+)
 from .storage import Storage, stable_id, utc_now
 
 LOGGER = logging.getLogger("hltv_service.worker")
@@ -29,6 +34,14 @@ LOGGER = logging.getLogger("hltv_service.worker")
 
 class IngestionBlocked(RuntimeError):
     """Signal a preserved, auditable upstream blocked state."""
+
+    def __init__(self, message: str, snapshot_id: str | None = None) -> None:
+        super().__init__(message)
+        self.snapshot_id = snapshot_id
+
+
+class IngestionAlreadyRunning(RuntimeError):
+    """Raised when the cross-process SQLite ingestion lock is held."""
 
 
 class IngestionWorker:
@@ -53,9 +66,19 @@ class IngestionWorker:
             "teams": 0,
             "rosters": 0,
             "events": 0,
+            "match_details": 0,
+            "lineups": 0,
+            "vetoes": 0,
+            "map_results": 0,
+            "team_map_stats": 0,
+            "team_results": 0,
+            "head_to_head": 0,
+            "item_failures": 0,
+            "item_blocked": 0,
             "duplicates": 0,
             "errors": [],
         }
+        self.run_id: str | None = None
 
     def _fetch(self, url: str, page_type: str) -> tuple[Page, str, datetime]:
         for attempt in range(1, self.config.retry_attempts + 1):
@@ -97,7 +120,7 @@ class IngestionWorker:
                     parse_error=str(exc),
                 )
                 self.storage.save_parse_result(snapshot_id, "blocked", str(exc))
-                raise IngestionBlocked(str(exc)) from exc
+                raise IngestionBlocked(str(exc), snapshot_id) from exc
             except HLTVNavigationError:
                 if attempt >= self.config.retry_attempts:
                     raise
@@ -193,9 +216,301 @@ class IngestionWorker:
                 self.storage.save_parse_result(snapshot_id, "failed", str(exc))
                 raise
 
+    def _item_result(
+        self,
+        *,
+        item_type: str,
+        provider_id: int | None,
+        url: str,
+        attempted_at: datetime,
+        status: str,
+        snapshot_id: str | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        if self.run_id is None:
+            return
+        self.storage.record_item_result(
+            run_id=self.run_id,
+            item_type=item_type,
+            provider_id=provider_id,
+            requested_url=url,
+            attempted_at=attempted_at,
+            completed_at=self.now(),
+            status=status,
+            source_snapshot_id=snapshot_id,
+            error=error,
+        )
+
+    def _match_priority(self, match: dict[str, Any]) -> tuple[int, str, int]:
+        status = match["status"]
+        scheduled = (
+            datetime.fromisoformat(match["scheduled_at_utc"])
+            if match.get("scheduled_at_utc")
+            else None
+        )
+        now = self.now()
+        if status == "live":
+            priority = 0
+        elif (
+            status == "upcoming"
+            and scheduled
+            and scheduled <= now + timedelta(hours=24)
+        ):
+            priority = 1
+        elif self.storage.latest_intelligence_verified_at(
+            "match_detail", "provider_match_id", match["provider_match_id"]
+        ) is None:
+            priority = 2
+        elif status == "finished":
+            detail = self.storage.match_detail(match["provider_match_id"])
+            priority = 3 if not detail or not detail[0].get("result") else 5
+        else:
+            priority = 4
+        return (
+            priority,
+            match.get("scheduled_at_utc") or "9999-12-31T23:59:59+00:00",
+            match["provider_match_id"],
+        )
+
+    def _match_detail_due(self, match: dict[str, Any]) -> bool:
+        last_verified = self.storage.latest_intelligence_verified_at(
+            "match_detail", "provider_match_id", match["provider_match_id"]
+        )
+        if last_verified is None:
+            return True
+        ttl = (
+            self.config.finished_match_refresh_ttl_seconds
+            if match["status"] == "finished"
+            else self.config.match_detail_ttl_seconds
+        )
+        detail = self.storage.match_detail(match["provider_match_id"])
+        if (
+            match["status"] == "finished"
+            and detail
+            and detail[0].get("result")
+        ):
+            return False
+        return last_verified <= self.now() - timedelta(seconds=ttl)
+
+    def ingest_match_details(self) -> None:
+        matches = sorted(
+            (
+                item
+                for item in self.storage.matches(limit=10_000)
+                if item.get("match_url") and self._match_detail_due(item)
+            ),
+            key=self._match_priority,
+        )[: self.config.maximum_match_details_per_run]
+        for match in matches:
+            attempted_at = self.now()
+            snapshot_id: str | None = None
+            provider_id = match["provider_match_id"]
+            url = match["match_url"]
+            try:
+                page, snapshot_id, observed_at = self._fetch(url, "match_detail")
+                parsed = parse_match_intelligence(
+                    page.html,
+                    url=page.url,
+                    observed_at=observed_at,
+                    source_snapshot_id=snapshot_id,
+                )
+                for kind, records, summary_key in (
+                    ("match_detail", [parsed.detail], "match_details"),
+                    ("match_lineup", parsed.lineups, "lineups"),
+                    ("match_veto", parsed.vetoes, "vetoes"),
+                    ("map_result", parsed.maps, "map_results"),
+                    ("team_result", parsed.recent_results, "team_results"),
+                    ("head_to_head", parsed.head_to_head, "head_to_head"),
+                ):
+                    for record in records:
+                        if self.storage.insert_intelligence(kind, record):
+                            self.summary[summary_key] += 1
+                        else:
+                            self.summary["duplicates"] += 1
+                self.storage.save_parse_result(snapshot_id, "success")
+                self._item_result(
+                    item_type="match_detail",
+                    provider_id=provider_id,
+                    url=url,
+                    attempted_at=attempted_at,
+                    status="success",
+                    snapshot_id=snapshot_id,
+                )
+            except IngestionBlocked as exc:
+                self.summary["item_blocked"] += 1
+                self._item_result(
+                    item_type="match_detail",
+                    provider_id=provider_id,
+                    url=url,
+                    attempted_at=attempted_at,
+                    status="blocked",
+                    snapshot_id=exc.snapshot_id,
+                    error=exc,
+                )
+                raise
+            except Exception as exc:
+                self.summary["item_failures"] += 1
+                self.summary["errors"].append(
+                    {
+                        "item_type": "match_detail",
+                        "provider_id": provider_id,
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                    }
+                )
+                if snapshot_id:
+                    self.storage.save_parse_result(snapshot_id, "failed", str(exc))
+                self._item_result(
+                    item_type="match_detail",
+                    provider_id=provider_id,
+                    url=url,
+                    attempted_at=attempted_at,
+                    status="failed",
+                    snapshot_id=snapshot_id,
+                    error=exc,
+                )
+
+    def ingest_team_map_stats(self) -> None:
+        now = self.now()
+        range_start = now - timedelta(days=self.config.map_stats_lookback_days)
+        candidates = []
+        for team in self.storage.known_team_profiles():
+            last_verified = self.storage.latest_intelligence_verified_at(
+                "team_map_stat", "provider_team_id", team["provider_team_id"]
+            )
+            if (
+                last_verified is None
+                or last_verified
+                <= now - timedelta(seconds=self.config.team_stats_ttl_seconds)
+            ):
+                candidates.append(team)
+        for team in candidates[: self.config.maximum_team_stats_per_run]:
+            attempted_at = self.now()
+            provider_id = team["provider_team_id"]
+            url = (
+                f"{BASE_URL}/stats/teams/maps/{provider_id}/-"
+                f"?startDate={range_start.date().isoformat()}"
+                f"&endDate={now.date().isoformat()}"
+            )
+            snapshot_id: str | None = None
+            try:
+                page, snapshot_id, observed_at = self._fetch(url, "team_map_stats")
+                records = parse_team_map_stats(
+                    page.html,
+                    provider_team_id=provider_id,
+                    range_start=range_start,
+                    range_end=now,
+                    observed_at=observed_at,
+                    source_snapshot_id=snapshot_id,
+                )
+                for record in records:
+                    if self.storage.insert_intelligence("team_map_stat", record):
+                        self.summary["team_map_stats"] += 1
+                    else:
+                        self.summary["duplicates"] += 1
+                self.storage.save_parse_result(snapshot_id, "success")
+                self._item_result(
+                    item_type="team_map_stats",
+                    provider_id=provider_id,
+                    url=url,
+                    attempted_at=attempted_at,
+                    status="success",
+                    snapshot_id=snapshot_id,
+                )
+            except IngestionBlocked as exc:
+                self.summary["item_blocked"] += 1
+                self._item_result(
+                    item_type="team_map_stats",
+                    provider_id=provider_id,
+                    url=url,
+                    attempted_at=attempted_at,
+                    status="blocked",
+                    snapshot_id=exc.snapshot_id,
+                    error=exc,
+                )
+                raise
+            except Exception as exc:
+                self.summary["item_failures"] += 1
+                if snapshot_id:
+                    self.storage.save_parse_result(snapshot_id, "failed", str(exc))
+                self._item_result(
+                    item_type="team_map_stats",
+                    provider_id=provider_id,
+                    url=url,
+                    attempted_at=attempted_at,
+                    status="failed",
+                    snapshot_id=snapshot_id,
+                    error=exc,
+                )
+
+    def ingest_event_details(self) -> None:
+        candidates = []
+        for event in self.storage.known_event_profiles():
+            last_verified = self.storage.latest_intelligence_verified_at(
+                "event_detail", "provider_event_id", event["provider_event_id"]
+            )
+            if (
+                last_verified is None
+                or last_verified
+                <= self.now() - timedelta(seconds=self.config.team_profile_ttl_seconds)
+            ):
+                candidates.append(event)
+        for event in candidates[: self.config.maximum_event_details_per_run]:
+            attempted_at = self.now()
+            provider_id = event["provider_event_id"]
+            url = event["provider_url"] or f"{BASE_URL}/events/{provider_id}/-"
+            snapshot_id: str | None = None
+            try:
+                page, snapshot_id, observed_at = self._fetch(url, "event_detail")
+                record = parse_event_detail(
+                    page.html,
+                    url=page.url,
+                    observed_at=observed_at,
+                    source_snapshot_id=snapshot_id,
+                )
+                if self.storage.insert_intelligence("event_detail", record):
+                    self.summary["events"] += 1
+                else:
+                    self.summary["duplicates"] += 1
+                self.storage.save_parse_result(snapshot_id, "success")
+                self._item_result(
+                    item_type="event_detail",
+                    provider_id=provider_id,
+                    url=url,
+                    attempted_at=attempted_at,
+                    status="success",
+                    snapshot_id=snapshot_id,
+                )
+            except IngestionBlocked as exc:
+                self.summary["item_blocked"] += 1
+                self._item_result(
+                    item_type="event_detail",
+                    provider_id=provider_id,
+                    url=url,
+                    attempted_at=attempted_at,
+                    status="blocked",
+                    snapshot_id=exc.snapshot_id,
+                    error=exc,
+                )
+                raise
+            except Exception as exc:
+                self.summary["item_failures"] += 1
+                if snapshot_id:
+                    self.storage.save_parse_result(snapshot_id, "failed", str(exc))
+                self._item_result(
+                    item_type="event_detail",
+                    provider_id=provider_id,
+                    url=url,
+                    attempted_at=attempted_at,
+                    status="failed",
+                    snapshot_id=snapshot_id,
+                    error=exc,
+                )
+
     def run(self, command: str) -> dict[str, Any]:
         attempted_at = self.now()
         run_id = stable_id("run", command, attempted_at.isoformat())
+        self.run_id = run_id
         self.storage.save_run(
             run_id=run_id,
             command=command,
@@ -203,13 +518,37 @@ class IngestionWorker:
             status="running",
             summary=self.summary,
         )
+        if not self.storage.acquire_worker_lock(
+            run_id,
+            acquired_at=attempted_at,
+            ttl_seconds=self.config.ingestion_lock_ttl_seconds,
+        ):
+            error = IngestionAlreadyRunning(
+                "Another HLTV ingestion worker already holds the lock."
+            )
+            self.storage.save_run(
+                run_id=run_id,
+                command=command,
+                attempted_at=attempted_at,
+                completed_at=self.now(),
+                status="skipped",
+                summary=self.summary,
+                error=str(error),
+            )
+            raise error
         try:
             if command in {"rankings", "refresh"}:
                 self.ingest_rankings()
             if command in {"matches", "refresh"}:
                 self.ingest_matches()
+            if command in {"details", "intelligence", "refresh"}:
+                self.ingest_match_details()
             if command in {"teams", "refresh"}:
                 self.ingest_teams()
+            if command in {"stats", "intelligence", "refresh"}:
+                self.ingest_team_map_stats()
+            if command in {"events", "intelligence", "refresh"}:
+                self.ingest_event_details()
         except IngestionBlocked as exc:
             self.summary["errors"].append(
                 {"type": "blocked", "message": str(exc)}
@@ -239,6 +578,8 @@ class IngestionWorker:
                 error=str(exc),
             )
             raise
+        finally:
+            self.storage.release_worker_lock(run_id)
         self.storage.save_run(
             run_id=run_id,
             command=command,
@@ -252,7 +593,19 @@ class IngestionWorker:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Ingest HLTV into the SQLite cache")
-    parser.add_argument("command", choices=("rankings", "matches", "teams", "refresh"))
+    parser.add_argument(
+        "command",
+        choices=(
+            "rankings",
+            "matches",
+            "teams",
+            "details",
+            "stats",
+            "events",
+            "intelligence",
+            "refresh",
+        ),
+    )
     return parser
 
 
@@ -281,6 +634,9 @@ def main(argv: list[str] | None = None) -> int:
     except IngestionBlocked as exc:
         LOGGER.error("HLTV ingestion blocked: %s", exc)
         return 2
+    except IngestionAlreadyRunning as exc:
+        LOGGER.error("HLTV ingestion skipped: %s", exc)
+        return 3
     except Exception as exc:
         LOGGER.exception("HLTV ingestion failed: %s", exc)
         return 1

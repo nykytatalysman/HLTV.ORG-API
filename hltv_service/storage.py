@@ -14,13 +14,23 @@ from typing import Any
 
 from . import PARSER_VERSION
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 ENTITY_TABLES = {
     "ranking": "ranking_observations",
     "team": "team_observations",
     "roster": "roster_observations",
     "match": "match_observations",
     "event": "event_observations",
+}
+INTELLIGENCE_TABLES = {
+    "match_detail": "match_detail_observations",
+    "match_lineup": "match_lineup_observations",
+    "match_veto": "match_veto_observations",
+    "map_result": "map_result_observations",
+    "team_map_stat": "team_map_stat_observations",
+    "team_result": "team_result_observations",
+    "head_to_head": "head_to_head_observations",
+    "event_detail": "event_detail_observations",
 }
 
 
@@ -146,6 +156,161 @@ class Storage:
                 data_json TEXT NOT NULL,
                 UNIQUE(source_snapshot_id, provider_event_id)
             );
+            CREATE TABLE IF NOT EXISTS snapshot_verifications (
+                verification_id TEXT PRIMARY KEY,
+                snapshot_id TEXT NOT NULL REFERENCES raw_snapshots(snapshot_id),
+                verified_at TEXT NOT NULL,
+                navigation_outcome TEXT NOT NULL,
+                blocked INTEGER NOT NULL CHECK (blocked IN (0, 1)),
+                UNIQUE(snapshot_id, verified_at, navigation_outcome, blocked)
+            );
+            CREATE TABLE IF NOT EXISTS normalized_verifications (
+                verification_id TEXT PRIMARY KEY,
+                observation_kind TEXT NOT NULL,
+                observation_id TEXT NOT NULL,
+                source_snapshot_id TEXT NOT NULL REFERENCES raw_snapshots(snapshot_id),
+                verified_at TEXT NOT NULL,
+                UNIQUE(
+                    observation_kind, observation_id,
+                    source_snapshot_id, verified_at
+                )
+            );
+            CREATE TABLE IF NOT EXISTS ingestion_item_results (
+                item_result_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES ingestion_runs(run_id),
+                item_type TEXT NOT NULL,
+                provider_id INTEGER,
+                requested_url TEXT NOT NULL,
+                attempted_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                source_snapshot_id TEXT,
+                error_type TEXT,
+                error TEXT
+            );
+            CREATE TABLE IF NOT EXISTS worker_locks (
+                lock_name TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL,
+                acquired_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS match_detail_observations (
+                observation_id TEXT PRIMARY KEY,
+                state_hash TEXT NOT NULL,
+                source_snapshot_id TEXT NOT NULL REFERENCES raw_snapshots(snapshot_id),
+                provider_match_id INTEGER NOT NULL,
+                scheduled_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                team_one_id INTEGER NOT NULL,
+                team_two_id INTEGER NOT NULL,
+                event_id INTEGER,
+                observed_at TEXT NOT NULL,
+                effective_at TEXT,
+                data_json TEXT NOT NULL,
+                UNIQUE(provider_match_id, state_hash)
+            );
+            CREATE TABLE IF NOT EXISTS match_lineup_observations (
+                observation_id TEXT PRIMARY KEY,
+                state_hash TEXT NOT NULL,
+                source_snapshot_id TEXT NOT NULL REFERENCES raw_snapshots(snapshot_id),
+                provider_match_id INTEGER NOT NULL,
+                provider_team_id INTEGER NOT NULL,
+                observed_at TEXT NOT NULL,
+                effective_at TEXT,
+                data_json TEXT NOT NULL,
+                UNIQUE(provider_match_id, provider_team_id, state_hash)
+            );
+            CREATE TABLE IF NOT EXISTS match_lineup_players (
+                lineup_player_id TEXT PRIMARY KEY,
+                lineup_observation_id TEXT NOT NULL
+                    REFERENCES match_lineup_observations(observation_id),
+                provider_match_id INTEGER NOT NULL,
+                provider_team_id INTEGER NOT NULL,
+                provider_player_id INTEGER,
+                nickname TEXT NOT NULL,
+                role TEXT,
+                stand_in INTEGER,
+                coach INTEGER NOT NULL CHECK (coach IN (0, 1))
+            );
+            CREATE TABLE IF NOT EXISTS match_veto_observations (
+                observation_id TEXT PRIMARY KEY,
+                state_hash TEXT NOT NULL,
+                source_snapshot_id TEXT NOT NULL REFERENCES raw_snapshots(snapshot_id),
+                provider_match_id INTEGER NOT NULL,
+                sequence_number INTEGER NOT NULL,
+                provider_team_id INTEGER,
+                canonical_map_id TEXT,
+                observed_at TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                UNIQUE(provider_match_id, sequence_number, state_hash)
+            );
+            CREATE TABLE IF NOT EXISTS map_result_observations (
+                observation_id TEXT PRIMARY KEY,
+                state_hash TEXT NOT NULL,
+                source_snapshot_id TEXT NOT NULL REFERENCES raw_snapshots(snapshot_id),
+                provider_match_id INTEGER NOT NULL,
+                map_order INTEGER NOT NULL,
+                canonical_map_id TEXT,
+                observed_at TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                UNIQUE(provider_match_id, map_order, state_hash)
+            );
+            CREATE TABLE IF NOT EXISTS team_map_stat_observations (
+                observation_id TEXT PRIMARY KEY,
+                state_hash TEXT NOT NULL,
+                source_snapshot_id TEXT NOT NULL REFERENCES raw_snapshots(snapshot_id),
+                provider_team_id INTEGER NOT NULL,
+                canonical_map_id TEXT,
+                range_start TEXT NOT NULL,
+                range_end TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                UNIQUE(
+                    provider_team_id, canonical_map_id,
+                    range_start, range_end, state_hash
+                )
+            );
+            CREATE TABLE IF NOT EXISTS team_result_observations (
+                observation_id TEXT PRIMARY KEY,
+                state_hash TEXT NOT NULL,
+                source_snapshot_id TEXT NOT NULL REFERENCES raw_snapshots(snapshot_id),
+                provider_team_id INTEGER NOT NULL,
+                provider_match_id INTEGER NOT NULL,
+                opponent_team_id INTEGER,
+                event_id INTEGER,
+                match_date TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                UNIQUE(provider_team_id, provider_match_id, state_hash)
+            );
+            CREATE TABLE IF NOT EXISTS head_to_head_observations (
+                observation_id TEXT PRIMARY KEY,
+                state_hash TEXT NOT NULL,
+                source_snapshot_id TEXT NOT NULL REFERENCES raw_snapshots(snapshot_id),
+                provider_match_id INTEGER NOT NULL,
+                provider_team_one_id INTEGER NOT NULL,
+                provider_team_two_id INTEGER NOT NULL,
+                event_id INTEGER,
+                match_date TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                UNIQUE(
+                    provider_match_id, provider_team_one_id,
+                    provider_team_two_id, state_hash
+                )
+            );
+            CREATE TABLE IF NOT EXISTS event_detail_observations (
+                observation_id TEXT PRIMARY KEY,
+                state_hash TEXT NOT NULL,
+                source_snapshot_id TEXT NOT NULL REFERENCES raw_snapshots(snapshot_id),
+                provider_event_id INTEGER NOT NULL,
+                start_at TEXT,
+                end_at TEXT,
+                observed_at TEXT NOT NULL,
+                effective_at TEXT,
+                data_json TEXT NOT NULL,
+                UNIQUE(provider_event_id, state_hash)
+            );
             CREATE INDEX IF NOT EXISTS rankings_lookup
                 ON ranking_observations(ranking_date, region, position, observed_at);
             CREATE INDEX IF NOT EXISTS teams_lookup
@@ -154,9 +319,74 @@ class Storage:
                 ON match_observations(provider_match_id, scheduled_at, observed_at);
             CREATE INDEX IF NOT EXISTS events_lookup
                 ON event_observations(provider_event_id, observed_at);
+            CREATE INDEX IF NOT EXISTS snapshot_verification_lookup
+                ON snapshot_verifications(snapshot_id, verified_at DESC);
+            CREATE INDEX IF NOT EXISTS normalized_verification_lookup
+                ON normalized_verifications(
+                    observation_kind, observation_id, verified_at DESC
+                );
+            CREATE INDEX IF NOT EXISTS ingestion_item_status_lookup
+                ON ingestion_item_results(
+                    run_id, item_type, provider_id, status, attempted_at
+                );
+            CREATE INDEX IF NOT EXISTS match_detail_lookup
+                ON match_detail_observations(
+                    provider_match_id, scheduled_at, observed_at DESC
+                );
+            CREATE INDEX IF NOT EXISTS match_detail_event_lookup
+                ON match_detail_observations(event_id, scheduled_at);
+            CREATE INDEX IF NOT EXISTS match_lineup_lookup
+                ON match_lineup_observations(
+                    provider_match_id, provider_team_id, observed_at DESC
+                );
+            CREATE INDEX IF NOT EXISTS match_lineup_player_lookup
+                ON match_lineup_players(
+                    provider_player_id, provider_match_id, provider_team_id
+                );
+            CREATE INDEX IF NOT EXISTS match_veto_lookup
+                ON match_veto_observations(
+                    provider_match_id, sequence_number, observed_at DESC
+                );
+            CREATE INDEX IF NOT EXISTS match_veto_map_lookup
+                ON match_veto_observations(canonical_map_id, observed_at DESC);
+            CREATE INDEX IF NOT EXISTS map_result_lookup
+                ON map_result_observations(
+                    provider_match_id, map_order, observed_at DESC
+                );
+            CREATE INDEX IF NOT EXISTS map_result_map_lookup
+                ON map_result_observations(canonical_map_id, observed_at DESC);
+            CREATE INDEX IF NOT EXISTS team_map_stat_lookup
+                ON team_map_stat_observations(
+                    provider_team_id, canonical_map_id, observed_at DESC
+                );
+            CREATE INDEX IF NOT EXISTS team_result_lookup
+                ON team_result_observations(
+                    provider_team_id, match_date DESC, observed_at DESC
+                );
+            CREATE INDEX IF NOT EXISTS team_result_match_lookup
+                ON team_result_observations(provider_match_id, observed_at DESC);
+            CREATE INDEX IF NOT EXISTS head_to_head_lookup
+                ON head_to_head_observations(
+                    provider_team_one_id, provider_team_two_id,
+                    match_date DESC, observed_at DESC
+                );
+            CREATE INDEX IF NOT EXISTS event_detail_lookup
+                ON event_detail_observations(
+                    provider_event_id, start_at, observed_at DESC
+                );
             """
         )
-        for table in ("raw_snapshots", "raw_parse_attempts", *ENTITY_TABLES.values()):
+        append_only_tables = (
+            "raw_snapshots",
+            "raw_parse_attempts",
+            "snapshot_verifications",
+            "normalized_verifications",
+            "ingestion_item_results",
+            "match_lineup_players",
+            *ENTITY_TABLES.values(),
+            *INTELLIGENCE_TABLES.values(),
+        )
+        for table in append_only_tables:
             self.connection.executescript(
                 f"""
                 CREATE TRIGGER IF NOT EXISTS {table}_no_update
@@ -229,6 +459,27 @@ class Storage:
                 PARSER_VERSION,
                 parse_status,
                 parse_error,
+            ),
+        )
+        self.connection.execute(
+            """
+            INSERT OR IGNORE INTO snapshot_verifications (
+                verification_id, snapshot_id, verified_at,
+                navigation_outcome, blocked
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                stable_id(
+                    "snapshot_verification",
+                    snapshot_id,
+                    iso(captured_at),
+                    navigation_outcome,
+                    int(blocked),
+                ),
+                snapshot_id,
+                iso(captured_at),
+                navigation_outcome,
+                int(blocked),
             ),
         )
         self.connection.commit()
@@ -369,6 +620,348 @@ class Storage:
         self.connection.commit()
         return cursor.rowcount == 1
 
+    def insert_intelligence(self, kind: str, model: Any) -> bool:
+        table = INTELLIGENCE_TABLES[kind]
+        data = model.model_dump(mode="json", exclude_none=False)
+        state = {
+            key: value
+            for key, value in data.items()
+            if key not in {"observed_at", "source_snapshot_id"}
+        }
+        state_hash = hashlib.sha256(canonical_json(state).encode()).hexdigest()
+        snapshot_id = data["source_snapshot_id"]
+        observed_at = data["observed_at"]
+        common = {
+            "state_hash": state_hash,
+            "source_snapshot_id": snapshot_id,
+            "observed_at": observed_at,
+            "data_json": canonical_json(data),
+        }
+        if kind == "match_detail":
+            logical = (data["provider_match_id"],)
+            fields = {
+                **common,
+                "provider_match_id": data["provider_match_id"],
+                "scheduled_at": data["scheduled_at_utc"],
+                "status": data["status"],
+                "team_one_id": data["team_one"]["provider_team_id"],
+                "team_two_id": data["team_two"]["provider_team_id"],
+                "event_id": (
+                    data["event"]["provider_event_id"] if data["event"] else None
+                ),
+                "effective_at": data["effective_at"],
+            }
+        elif kind == "match_lineup":
+            logical = (data["provider_match_id"], data["provider_team_id"])
+            fields = {
+                **common,
+                "provider_match_id": data["provider_match_id"],
+                "provider_team_id": data["provider_team_id"],
+                "effective_at": data["effective_at"],
+            }
+        elif kind == "match_veto":
+            logical = (data["provider_match_id"], data["sequence_number"])
+            fields = {
+                **common,
+                "provider_match_id": data["provider_match_id"],
+                "sequence_number": data["sequence_number"],
+                "provider_team_id": data["provider_team_id"],
+                "canonical_map_id": data["canonical_map_id"],
+            }
+        elif kind == "map_result":
+            logical = (data["provider_match_id"], data["map_order"])
+            fields = {
+                **common,
+                "provider_match_id": data["provider_match_id"],
+                "map_order": data["map_order"],
+                "canonical_map_id": data["canonical_map_id"],
+            }
+        elif kind == "team_map_stat":
+            logical = (
+                data["provider_team_id"],
+                data["canonical_map_id"] or data["map_name"],
+                data["range_start"],
+                data["range_end"],
+            )
+            fields = {
+                **common,
+                "provider_team_id": data["provider_team_id"],
+                "canonical_map_id": data["canonical_map_id"],
+                "range_start": data["range_start"],
+                "range_end": data["range_end"],
+            }
+        elif kind == "team_result":
+            logical = (data["provider_team_id"], data["provider_match_id"])
+            fields = {
+                **common,
+                "provider_team_id": data["provider_team_id"],
+                "provider_match_id": data["provider_match_id"],
+                "opponent_team_id": data["opponent_team_id"],
+                "event_id": data["provider_event_id"],
+                "match_date": data["match_date"],
+            }
+        elif kind == "head_to_head":
+            logical = (
+                data["provider_match_id"],
+                data["provider_team_one_id"],
+                data["provider_team_two_id"],
+            )
+            fields = {
+                **common,
+                "provider_match_id": data["provider_match_id"],
+                "provider_team_one_id": data["provider_team_one_id"],
+                "provider_team_two_id": data["provider_team_two_id"],
+                "event_id": data["provider_event_id"],
+                "match_date": data["match_date"],
+            }
+        else:
+            logical = (data["provider_event_id"],)
+            fields = {
+                **common,
+                "provider_event_id": data["provider_event_id"],
+                "start_at": data["start_at"],
+                "end_at": data["end_at"],
+                "effective_at": data["effective_at"],
+            }
+        observation_id = stable_id(kind, *logical, state_hash)
+        fields = {"observation_id": observation_id, **fields}
+        columns = tuple(fields)
+        cursor = self.connection.execute(
+            f"INSERT OR IGNORE INTO {table} ({','.join(columns)}) "
+            f"VALUES ({','.join('?' for _ in columns)})",
+            tuple(fields[column] for column in columns),
+        )
+        inserted = cursor.rowcount == 1
+        if kind == "match_lineup" and inserted:
+            participants = [
+                *((player, False) for player in data["players"]),
+                *(
+                    [(data["coach"], True)]
+                    if data.get("coach")
+                    else []
+                ),
+            ]
+            for index, (player, coach) in enumerate(participants):
+                self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO match_lineup_players (
+                        lineup_player_id, lineup_observation_id,
+                        provider_match_id, provider_team_id,
+                        provider_player_id, nickname, role, stand_in, coach
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        stable_id(
+                            "lineup_player",
+                            observation_id,
+                            index,
+                            player["provider_player_id"],
+                            player["nickname"],
+                            int(coach),
+                        ),
+                        observation_id,
+                        data["provider_match_id"],
+                        data["provider_team_id"],
+                        player["provider_player_id"],
+                        player["nickname"],
+                        player["status"],
+                        (
+                            int(player["stand_in"])
+                            if player["stand_in"] is not None
+                            else None
+                        ),
+                        int(coach),
+                    ),
+                )
+        self.connection.execute(
+            """
+            INSERT OR IGNORE INTO normalized_verifications (
+                verification_id, observation_kind, observation_id,
+                source_snapshot_id, verified_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                stable_id(
+                    "normalized_verification",
+                    kind,
+                    observation_id,
+                    snapshot_id,
+                    observed_at,
+                ),
+                kind,
+                observation_id,
+                snapshot_id,
+                observed_at,
+            ),
+        )
+        self.connection.commit()
+        return inserted
+
+    def intelligence_latest(
+        self,
+        kind: str,
+        *,
+        where: str,
+        params: tuple[Any, ...],
+        partition_by: str,
+        order_by: str,
+        observed_before: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        table = INTELLIGENCE_TABLES[kind]
+        clauses = [where]
+        query_params = list(params)
+        if observed_before:
+            clauses.append("observed_at <= ?")
+            query_params.append(observed_before)
+        verification_cutoff = (
+            "AND verification.verified_at <= ?" if observed_before else ""
+        )
+        verification_params: list[Any] = (
+            [observed_before] if observed_before else []
+        )
+        rows = self.connection.execute(
+            f"""
+            WITH ranked AS (
+                SELECT observation_id, data_json, observed_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY {partition_by}
+                        ORDER BY observed_at DESC, observation_id DESC
+                    ) row_number
+                FROM {table}
+                WHERE {' AND '.join(clauses)}
+            )
+            SELECT ranked.observation_id, ranked.data_json,
+                (
+                    SELECT MAX(verification.verified_at)
+                    FROM normalized_verifications verification
+                    WHERE verification.observation_kind = ?
+                      AND verification.observation_id = ranked.observation_id
+                      {verification_cutoff}
+                ) last_verified_at
+            FROM ranked
+            WHERE ranked.row_number = 1
+            ORDER BY {order_by}
+            LIMIT ? OFFSET ?
+            """,
+            (
+                *query_params,
+                kind,
+                *verification_params,
+                limit,
+                offset,
+            ),
+        ).fetchall()
+        result = []
+        for row in rows:
+            data = json.loads(row["data_json"])
+            data["_observation_id"] = row["observation_id"]
+            data["_last_verified_at"] = row["last_verified_at"]
+            result.append(data)
+        return result
+
+    def latest_intelligence_verified_at(
+        self, kind: str, id_column: str, provider_id: int
+    ) -> datetime | None:
+        table = INTELLIGENCE_TABLES[kind]
+        row = self.connection.execute(
+            f"""
+            SELECT MAX(verification.verified_at)
+            FROM {table} observation
+            JOIN normalized_verifications verification
+              ON verification.observation_kind = ?
+             AND verification.observation_id = observation.observation_id
+            WHERE observation.{id_column} = ?
+            """,
+            (kind, provider_id),
+        ).fetchone()
+        return datetime.fromisoformat(row[0]) if row and row[0] else None
+
+    def record_item_result(
+        self,
+        *,
+        run_id: str,
+        item_type: str,
+        provider_id: int | None,
+        requested_url: str,
+        attempted_at: datetime,
+        completed_at: datetime,
+        status: str,
+        source_snapshot_id: str | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        error_type = type(error).__name__ if error else None
+        error_text = str(error) if error else None
+        self.connection.execute(
+            """
+            INSERT OR IGNORE INTO ingestion_item_results (
+                item_result_id, run_id, item_type, provider_id,
+                requested_url, attempted_at, completed_at, status,
+                source_snapshot_id, error_type, error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                stable_id(
+                    "item_result",
+                    run_id,
+                    item_type,
+                    provider_id,
+                    requested_url,
+                    iso(attempted_at),
+                    status,
+                    source_snapshot_id,
+                    error_type,
+                    error_text,
+                ),
+                run_id,
+                item_type,
+                provider_id,
+                requested_url,
+                iso(attempted_at),
+                iso(completed_at),
+                status,
+                source_snapshot_id,
+                error_type,
+                error_text,
+            ),
+        )
+        self.connection.commit()
+
+    def acquire_worker_lock(
+        self,
+        owner_id: str,
+        *,
+        acquired_at: datetime,
+        ttl_seconds: int,
+    ) -> bool:
+        expires_at = acquired_at.timestamp() + ttl_seconds
+        with self.transaction():
+            self.connection.execute(
+                "DELETE FROM worker_locks WHERE expires_at <= ?",
+                (iso(acquired_at),),
+            )
+            cursor = self.connection.execute(
+                """
+                INSERT OR IGNORE INTO worker_locks (
+                    lock_name, owner_id, acquired_at, expires_at
+                ) VALUES ('ingestion', ?, ?, ?)
+                """,
+                (
+                    owner_id,
+                    iso(acquired_at),
+                    iso(datetime.fromtimestamp(expires_at, tz=UTC)),
+                ),
+            )
+        return cursor.rowcount == 1
+
+    def release_worker_lock(self, owner_id: str) -> None:
+        self.connection.execute(
+            "DELETE FROM worker_locks WHERE lock_name='ingestion' AND owner_id=?",
+            (owner_id,),
+        )
+        self.connection.commit()
+
     def list_latest(
         self,
         kind: str,
@@ -440,17 +1033,23 @@ class Storage:
 
     def status(self) -> dict[str, Any]:
         attempted = self.connection.execute(
-            "SELECT * FROM ingestion_runs ORDER BY attempted_at DESC LIMIT 1"
+            """
+            SELECT * FROM ingestion_runs
+            ORDER BY attempted_at DESC, rowid DESC LIMIT 1
+            """
         ).fetchone()
         successful = self.connection.execute(
             """
             SELECT * FROM ingestion_runs WHERE status = 'success'
-            ORDER BY completed_at DESC LIMIT 1
+            ORDER BY completed_at DESC, rowid DESC LIMIT 1
             """
         ).fetchone()
         counts = {
             name: self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            for name, table in ENTITY_TABLES.items()
+            for name, table in {
+                **ENTITY_TABLES,
+                **INTELLIGENCE_TABLES,
+            }.items()
         }
         newest = self.connection.execute(
             """
@@ -458,6 +1057,9 @@ class Storage:
                 SELECT observed_at FROM ranking_observations
                 UNION ALL SELECT observed_at FROM team_observations
                 UNION ALL SELECT observed_at FROM match_observations
+                UNION ALL SELECT observed_at FROM match_detail_observations
+                UNION ALL SELECT observed_at FROM team_map_stat_observations
+                UNION ALL SELECT observed_at FROM event_detail_observations
             )
             """
         ).fetchone()[0]
@@ -591,8 +1193,143 @@ class Storage:
         rows = self.history(kind, id_column, provider_id, 1, 0)
         return rows[0] if rows else None
 
+    def match_detail(
+        self, provider_match_id: int, observed_before: str | None = None
+    ) -> list[dict[str, Any]]:
+        return self.intelligence_latest(
+            "match_detail",
+            where="provider_match_id = ?",
+            params=(provider_match_id,),
+            partition_by="provider_match_id",
+            order_by="observed_at DESC",
+            observed_before=observed_before,
+            limit=1,
+        )
+
+    def match_lineups(
+        self, provider_match_id: int, observed_before: str | None = None
+    ) -> list[dict[str, Any]]:
+        return self.intelligence_latest(
+            "match_lineup",
+            where="provider_match_id = ?",
+            params=(provider_match_id,),
+            partition_by="provider_team_id",
+            order_by="json_extract(data_json, '$.provider_team_id') ASC",
+            observed_before=observed_before,
+        )
+
+    def match_vetoes(
+        self, provider_match_id: int, observed_before: str | None = None
+    ) -> list[dict[str, Any]]:
+        return self.intelligence_latest(
+            "match_veto",
+            where="provider_match_id = ?",
+            params=(provider_match_id,),
+            partition_by="sequence_number",
+            order_by="json_extract(data_json, '$.sequence_number') ASC",
+            observed_before=observed_before,
+        )
+
+    def match_maps(
+        self, provider_match_id: int, observed_before: str | None = None
+    ) -> list[dict[str, Any]]:
+        return self.intelligence_latest(
+            "map_result",
+            where="provider_match_id = ?",
+            params=(provider_match_id,),
+            partition_by="map_order",
+            order_by="json_extract(data_json, '$.map_order') ASC",
+            observed_before=observed_before,
+        )
+
+    def team_map_stats(
+        self,
+        provider_team_id: int,
+        observed_before: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self.intelligence_latest(
+            "team_map_stat",
+            where="provider_team_id = ?",
+            params=(provider_team_id,),
+            partition_by=(
+                "COALESCE(canonical_map_id, "
+                "json_extract(data_json, '$.map_name'))"
+            ),
+            order_by="json_extract(data_json, '$.map_name') ASC",
+            observed_before=observed_before,
+        )
+
+    def team_results(
+        self,
+        provider_team_id: int,
+        observed_before: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        return self.intelligence_latest(
+            "team_result",
+            where="provider_team_id = ?",
+            params=(provider_team_id,),
+            partition_by="provider_match_id",
+            order_by="json_extract(data_json, '$.match_date') DESC",
+            observed_before=observed_before,
+            limit=limit,
+            offset=offset,
+        )
+
+    def head_to_head(
+        self,
+        team_one_id: int,
+        team_two_id: int,
+        observed_before: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        low, high = sorted((team_one_id, team_two_id))
+        return self.intelligence_latest(
+            "head_to_head",
+            where=(
+                "MIN(provider_team_one_id, provider_team_two_id) = ? "
+                "AND MAX(provider_team_one_id, provider_team_two_id) = ?"
+            ),
+            params=(low, high),
+            partition_by="provider_match_id",
+            order_by="json_extract(data_json, '$.match_date') DESC",
+            observed_before=observed_before,
+            limit=limit,
+            offset=offset,
+        )
+
+    def event_detail(
+        self, provider_event_id: int, observed_before: str | None = None
+    ) -> list[dict[str, Any]]:
+        return self.intelligence_latest(
+            "event_detail",
+            where="provider_event_id = ?",
+            params=(provider_event_id,),
+            partition_by="provider_event_id",
+            order_by="observed_at DESC",
+            observed_before=observed_before,
+            limit=1,
+        )
+
+    def known_event_profiles(self) -> list[dict[str, Any]]:
+        candidates: dict[int, dict[str, Any]] = {}
+        for item in self.list_latest(
+            "match", limit=10_000, partition_by="provider_match_id"
+        ):
+            event = item.get("event")
+            if event and event.get("provider_event_id"):
+                candidates[event["provider_event_id"]] = {
+                    "provider_event_id": event["provider_event_id"],
+                    "name": event.get("name"),
+                    "provider_url": event.get("provider_url"),
+                }
+        return list(candidates.values())
+
     def has_records(self, kind: str) -> bool:
+        tables = {**ENTITY_TABLES, **INTELLIGENCE_TABLES}
         row = self.connection.execute(
-            f"SELECT EXISTS(SELECT 1 FROM {ENTITY_TABLES[kind]} LIMIT 1)"
+            f"SELECT EXISTS(SELECT 1 FROM {tables[kind]} LIMIT 1)"
         ).fetchone()
         return bool(row[0])
